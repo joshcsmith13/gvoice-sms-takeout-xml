@@ -13,7 +13,8 @@ from shutil import copyfileobj, move
 from tempfile import NamedTemporaryFile
 from time import strftime
 
-sms_backup_filename = "./gvoice-all.xml"
+# SMS Backup & Restore requires the filename to start with "sms-" followed by a timestamp
+sms_backup_filename = "./sms-" + datetime.now().strftime("%Y%m%d%H%M%S") + ".xml"
 sms_backup_path = Path(sms_backup_filename)
 # Clear file if it already exists
 sms_backup_path.open("w").close()
@@ -91,8 +92,13 @@ def main():
     if seconds > 0 or (hours == 0 and minutes == 0):
         parts.append(f"{seconds} seconds")
     time_str = ", ".join(parts)
-    print(f"Processed {num_sms} messages, {num_img} images, {num_vid} videos, and {num_vcf} contact cards in {time_str}")
-    write_header(sms_backup_filename, num_sms)
+    # Count actual written messages from the output file (num_sms over-counts
+    # messages that were skipped, e.g. bare "MMS Sent"/"MMS Received" entries)
+    with open(sms_backup_filename, "r", encoding="utf8") as f:
+        content = f.read()
+    actual_count = content.count("<sms ") + content.count("<mms ")
+    print(f"Processed {actual_count} messages ({num_img} images, {num_vid} videos, {num_vcf} contact cards) in {time_str}")
+    write_header(sms_backup_filename, actual_count)
 
 def remove_problematic_files():
     #Get user confimration before deleteing files
@@ -140,12 +146,17 @@ def escape_xml(s):
 # Function to extract img src from HTML files
 def extract_src(html_directory):
     src_list = []
-    for html_file in Path(html_directory).rglob('*.html'):  # Assuming HTML files have .html extension
+    html_files = list(Path(html_directory).rglob('*.html'))
+    print(f"Found {len(html_files)} HTML files to scan for attachments...")
+    for i, html_file in enumerate(html_files, 1):
         with open(html_file, 'r', encoding='utf-8') as file:
             soup = BeautifulSoup(file, 'html.parser')
             src_list.extend([img['src'] for img in soup.find_all('img') if 'src' in img.attrs])
             src_list.extend([a['href'] for a in soup.find_all('a', class_='video') if 'href' in a.attrs])
             src_list.extend([a['href'] for a in soup.find_all('a', class_='vcard') if 'href' in a.attrs])
+        if i % 100 == 0:
+            print(f"  Scanned {i}/{len(html_files)} files...", flush=True)
+    print(f"  Done scanning {len(html_files)} files.")
     return src_list
 
 # Function to list attachment filenames with specific extensions
@@ -327,7 +338,7 @@ def write_mms_messages(file, participants_raw, messages_raw, own_number, src_fil
             text_only = 0
             for video in videos:
                 # I have only encountered jpg and gif, but I have read that GV can ecxport png
-                supported_types = ["mp4"]
+                supported_types = ["mp4", "3gp"]
                 video_src = video.get("href")
                 # Change to use the src_filename_map to find the image filename that corresponds to the image_src value, which is unique to each image MMS message.
                 # Attempt to find a direct match for the image_src in the src_filename_map
@@ -335,7 +346,9 @@ def write_mms_messages(file, participants_raw, messages_raw, own_number, src_fil
                 # If a direct match isn't found, prepend the start of the HTML file name to find the image name
                 if video_filename is None or video_filename == "No unused match found":  # Adjust based on your actual "not found" condition
                     html_filename_prefix = file.split('-', 1)[0]
-                    video_filename = html_filename_prefix + video_src[image_src.find('-'):]
+                    # Grok says the following line is bad copy-paste and should be updated as the one below it.  
+                    # video_filename = html_filename_prefix + video_src[image_src.find('-'):]
+                    video_filename = html_filename_prefix + video_src[video_src.find('-'):]
                     video_filename_with_ext = f"{video_filename}.*"
                     video_path = list(Path.cwd().glob(f"**/{video_filename_with_ext}"))
                     video_path = [p for p in video_path if p.suffix[1:] in supported_types]
@@ -344,7 +357,7 @@ def write_mms_messages(file, participants_raw, messages_raw, own_number, src_fil
 
                 assert (
                         len(video_path) != 0
-                ), f"No matching videos found. File name: {original_video_filename}"
+                ), f"No matching videos found. File name: {video_filename}"
                 assert (
                         len(video_path) == 1
                 ), f"Multiple potential matching videos found. Images: {[x for x in video_path]!r}"
@@ -352,6 +365,9 @@ def write_mms_messages(file, participants_raw, messages_raw, own_number, src_fil
                 video_path = video_path[0]
                 print(f'Video path: {video_path}')
                 video_type = video_path.suffix[1:]
+                # Map file extensions to proper MIME types
+                video_mime_map = {"3gp": "3gpp", "3g2": "3gpp2"}
+                video_mime_type = video_mime_map.get(video_type, video_type)
 
                 with video_path.open("rb") as fb:
                     video_bytes = fb.read()
@@ -361,7 +377,7 @@ def write_mms_messages(file, participants_raw, messages_raw, own_number, src_fil
                 relative_video_path = video_path.relative_to(Path.cwd())
 
                 video_parts += (
-                    f'    <part seq="0" ct="video/{video_type}" name="{relative_video_path}" '
+                    f'    <part seq="0" ct="video/{video_mime_type}" name="{relative_video_path}" '
                     f'chset="null" cd="null" fn="null" cid="&lt;{relative_video_path}&gt;" '
                     f'cl="{relative_video_path}" ctt_s="null" ctt_t="null" text="null" '
                     f'data="{byte_string[2:-1]}" />\n'
@@ -378,12 +394,20 @@ def write_mms_messages(file, participants_raw, messages_raw, own_number, src_fil
                 # Change to use the src_filename_map to find the vcards filename that corresponds to the vcards_src value, which is unique to each vcards MMS message.
                 vcard_filename = src_filename_map.get(vcard_src)
                 # If a direct match isn't found, prepend the start of the HTML file name to find the image name
-                if vcard_filename is None or vcard_filename == "No unused match found":  # Adjust based on your actual "not found" condition
+                # if vcard_filename is None or vcard_filename == "No unused match found":  # Adjust based on your actual "not found" condition
+                #     html_filename_prefix = file.split('-', 1)[0]
+                # bad copied code....
+                #     vcard_filename = html_filename_prefix + vcard_src[vcard_src.find('-'):]
+                #     vcard_filename_with_ext = f"{image_filename}.*"
+                #     vcard_path = list(Path.cwd().glob(f"**/{vcard_filename_with_ext}"))
+                #     vcard_path = [p for p in image_path if p.suffix[1:] in supported_types]
+                # fixed code...
+                if vcard_filename is None or vcard_filename == "No unused match found":
                     html_filename_prefix = file.split('-', 1)[0]
                     vcard_filename = html_filename_prefix + vcard_src[vcard_src.find('-'):]
-                    vcard_filename_with_ext = f"{image_filename}.*"
+                    vcard_filename_with_ext = f"{vcard_filename}.*"
                     vcard_path = list(Path.cwd().glob(f"**/{vcard_filename_with_ext}"))
-                    vcard_path = [p for p in image_path if p.suffix[1:] in supported_types]
+                    vcard_path = [p for p in vcard_path if p.suffix[1:] in supported_types]                    
                 else:
                     vcard_path = [p for p in Path.cwd().glob(f"**/*{vcard_filename}") if p.is_file()]                
 

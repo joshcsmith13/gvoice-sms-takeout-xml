@@ -1,2 +1,5 @@
 sms/
 gvoice-all.xml
+sms-*.xml
+Calls/
+.venv/
