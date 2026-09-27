@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.9"
+# dependencies = [
+#   "python-dateutil",
+#   "phonenumbers",
+#   "beautifulsoup4",
+# ]
+# ///
 import dateutil.parser
 import glob
 import os
